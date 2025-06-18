@@ -3,6 +3,7 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(name = "check_updates")]
 #[command(about = "Check for system updates via PackageKit", long_about = None)]
+#[command(version)]
 pub struct Args {
     #[arg(long, value_name = "FILE")]
     pub lock: Option<String>,
