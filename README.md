@@ -1,6 +1,6 @@
 # check-updates
 
-A Nagios/NRPE plugin for monitoring system updates using PackageKit, written in Rust.
+A simple command-line tool for checking and applying system updates using PackageKit, written in Rust.
 
 [![Rust](https://github.com/liberodark/check-updates/actions/workflows/rust.yml/badge.svg)](https://github.com/liberodark/check-updates/actions/workflows/rust.yml)
 [![Security Audit](https://github.com/liberodark/check-updates/actions/workflows/security-audit.yml/badge.svg)](https://github.com/liberodark/check-updates/actions/workflows/security-audit.yml)
@@ -12,7 +12,6 @@ A Nagios/NRPE plugin for monitoring system updates using PackageKit, written in 
 - Apply updates automatically (optional)
 - Lock file support to prevent concurrent execution
 - Cron-like scheduling support
-- Compatible with Nagios performance data format
 - Multi-distribution support (any system with PackageKit)
 - Native D-Bus communication for better performance
 
@@ -54,13 +53,8 @@ sudo zypper install PackageKit dbus-1
 git clone https://github.com/liberodark/check-updates.git
 cd check-updates
 cargo build --release
-sudo cp target/release/check_updates /usr/local/nagios/libexec/
-sudo chmod +x /usr/local/nagios/libexec/check_updates
-```
-
-### Create symlink for command-line usage
-```bash
-sudo ln -s /usr/local/nagios/libexec/check_updates /usr/bin/check_updates
+sudo cp target/release/check_updates /usr/local/bin/
+sudo chmod +x /usr/local/bin/check_updates
 ```
 
 ### Precompiled binaries
@@ -75,11 +69,6 @@ Check for updates without applying them:
 check_updates
 ```
 
-### With warning and critical thresholds
-```bash
-check_updates -w 10 -c 20
-```
-
 ### Apply all updates
 ```bash
 sudo check_updates --update -y
@@ -92,7 +81,7 @@ sudo check_updates --security-update -y
 
 ### With lock file (prevent concurrent execution)
 ```bash
-check_updates --lock /tmp/check_updates.lock -w 10 -c 20
+check_updates --lock /tmp/check_updates.lock
 ```
 
 ### With cron scheduling
@@ -110,13 +99,11 @@ check_updates --lock /tmp/check_updates.lock --cron "0 */6 * *" --update -y
 
 ```
 Options:
-  --lock <FILE>            Avoid concurrent execution by locking specified file
+  --lock <FILE>            Lock file to prevent concurrent execution
   --cron <CRON_SPEC>       Abort execution if run before the end of the current period (requires --lock)
-  -w, --warning <N>        Return warning if more than N security updates are available [default: 10]
-  -c, --critical <N>       Return critical if more than N security updates are available [default: 20]
-  --security-update        Apply security updates instead of just showing them
-  --update                 Apply all updates instead of just showing them
-  -y, --yes               Disable interactive mode (assume yes)
+  --security-update        Apply security updates
+  --update                 Apply all updates
+  -y, --yes               Non-interactive mode (assume yes)
   -h, --help              Print help
   -V, --version           Print version
 ```
@@ -136,41 +123,27 @@ Fields can be:
 - `*` for any value
 - `*/n` for steps (e.g., `*/5` for every 5 units)
 
-## Nagios/NRPE Configuration
-
-Add to your NRPE configuration (`/usr/local/nagios/etc/nrpe.cfg`):
-
-```bash
-# Basic check
-command[check_updates]=/usr/local/nagios/libexec/check_updates --lock /tmp/check_updates.lock -w $ARG1$ -c $ARG2$
-
-# With automatic security updates
-command[check_updates_auto]=sudo /usr/local/nagios/libexec/check_updates --lock /tmp/check_updates.lock --security-update -y -w $ARG1$ -c $ARG2$
-```
-
-### Sudo Configuration
-
-For automatic updates, add to `/etc/sudoers.d/nagios`:
-```
-nagios ALL=(ALL) NOPASSWD: /usr/local/nagios/libexec/check_updates
-```
-
 ## Output Format
 
-The plugin follows Nagios plugin standards:
+The tool provides clear and simple output:
 
 ```
-UPDATE OK - Security-Update = 0 | 'Total Update' = 5 'Security Update' = 0
-UPDATE WARNING - Security-Update = 12 | 'Total Update' = 25 'Security Update' = 12
-UPDATE CRITICAL - Security-Update = 25 | 'Total Update' = 40 'Security Update' = 25
+Available updates: 25 total (5 security)
+------------------------------------------------------------
+firefox 121.0-1 [SECURITY]
+kernel 6.6.8-1
+vim 9.0.2155-1
+...
+
+5 updates will be applied
+Applying updates...
+Updates applied successfully
 ```
 
 ## Exit Codes
 
-- 0: OK - Updates below thresholds
-- 1: WARNING - Security updates exceed warning threshold
-- 2: CRITICAL - Security updates exceed critical threshold or error occurred
-- 3: UNKNOWN - Unable to determine update status
+- 0: Success
+- 1: Error occurred
 
 ## Cron Examples
 
@@ -178,12 +151,12 @@ UPDATE CRITICAL - Security-Update = 25 | 'Total Update' = 40 'Security Update' =
 
 Daily security updates at 2 AM:
 ```cron
-0 2 * * * root /usr/bin/check_updates --lock /var/lock/check_updates.lock --cron "@daily" --security-update -y
+0 2 * * * root /usr/local/bin/check_updates --lock /var/lock/check_updates.lock --cron "@daily" --security-update -y
 ```
 
 Weekly full updates on Sunday at 3 AM:
 ```cron
-0 3 * * 0 root /usr/bin/check_updates --lock /var/lock/check_updates.lock --cron "@weekly" --update -y
+0 3 * * 0 root /usr/local/bin/check_updates --lock /var/lock/check_updates.lock --cron "@weekly" --update -y
 ```
 
 ## Development
@@ -211,16 +184,6 @@ Any Linux distribution with PackageKit support:
 - Fedora (dnf backend)
 - openSUSE (zypper backend)
 - Arch Linux (pacman backend)
-
-## Differences from C Version
-
-This Rust implementation offers several improvements over the original C version:
-
-- **Memory safety**: No buffer overflows or memory leaks
-- **Better error handling**: Comprehensive error messages with context
-- **Native D-Bus**: Direct PackageKit API communication instead of shell commands
-- **Async operations**: Non-blocking I/O with tokio
-- **Type safety**: Compile-time guarantees with Rust's type system
 
 ## License
 

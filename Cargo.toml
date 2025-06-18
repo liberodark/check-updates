@@ -2,11 +2,11 @@
 name = "check_updates"
 version = "0.1.0"
 edition = "2024"
-description = "Nagios plugin for checking system updates via PackageKit"
+description = "Checking system updates via PackageKit"
 license = "GPL-3.0"
 repository = "https://github.com/liberodark/check-updates"
 readme = "README.md"
-keywords = ["nagios", "monitoring", "packagekit", "updates", "security"]
+keywords = ["packagekit", "updates", "security"]
 categories = ["command-line-utilities", "system-tools"]
 
 [dependencies]

@@ -2,7 +2,6 @@ mod cli;
 mod config;
 mod cron;
 mod lock;
-mod nagios;
 mod packagekit;
 
 use anyhow::{Context, Result};
@@ -17,7 +16,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::cli::Args;
 use crate::config::Config;
 use crate::lock::FileLock;
-use crate::nagios::{NagiosOutput, NagiosStatus};
 use crate::packagekit::PackageManager;
 
 #[tokio::main]
@@ -48,12 +46,7 @@ async fn main() -> Result<()> {
             if config.cron_spec.is_some() {
                 return Ok(());
             } else {
-                let output = NagiosOutput {
-                    status: NagiosStatus::Warning,
-                    message: "Failed to acquire lock file".to_string(),
-                    perfdata: None,
-                };
-                println!("{}", output);
+                eprintln!("Error: Failed to acquire lock file");
                 std::process::exit(1);
             }
         }
@@ -77,23 +70,15 @@ async fn main() -> Result<()> {
     };
 
     match run_update_check(config, running).await {
-        Ok(output) => {
-            println!("{}", output);
-            std::process::exit(output.status.exit_code());
-        }
+        Ok(()) => Ok(()),
         Err(e) => {
-            let output = NagiosOutput {
-                status: NagiosStatus::Critical,
-                message: format!("An error occurred: {:#}", e),
-                perfdata: None,
-            };
-            println!("{}", output);
-            std::process::exit(2);
+            eprintln!("Error: {:#}", e);
+            std::process::exit(1);
         }
     }
 }
 
-async fn run_update_check(config: Config, running: Arc<AtomicBool>) -> Result<NagiosOutput> {
+async fn run_update_check(config: Config, running: Arc<AtomicBool>) -> Result<()> {
     let pm = PackageManager::new().await?;
 
     if running.load(Ordering::Relaxed) {
@@ -104,23 +89,16 @@ async fn run_update_check(config: Config, running: Arc<AtomicBool>) -> Result<Na
     }
 
     if !running.load(Ordering::Relaxed) {
-        return Ok(NagiosOutput {
-            status: NagiosStatus::Critical,
-            message: "Operation cancelled".to_string(),
-            perfdata: None,
-        });
+        eprintln!("Operation cancelled");
+        return Ok(());
     }
 
     eprintln!("Getting available updates...");
     let updates = pm.get_updates().await.context("Failed to get updates")?;
 
     if updates.is_empty() {
-        eprintln!("Everything is up to date.");
-        return Ok(NagiosOutput {
-            status: NagiosStatus::Ok,
-            message: "Everything is up to date".to_string(),
-            perfdata: Some("'Total Update'=0 'Security Update'=0".to_string()),
-        });
+        println!("Everything is up to date");
+        return Ok(());
     }
 
     eprintln!("Getting update details...");
@@ -142,29 +120,19 @@ async fn run_update_check(config: Config, running: Arc<AtomicBool>) -> Result<Na
         all_updates.push(update.clone());
     }
 
-    if config.apply_updates || config.apply_security_updates {
-        eprintln!("The following packages will be updated:");
-    } else {
-        eprintln!("The following packages are security updates:");
-    }
+    println!(
+        "\nAvailable updates: {} total ({} security)",
+        total_count, security_count
+    );
+    println!("{}", "-".repeat(60));
 
-    let mut details = String::from("Security updates:\n");
     for update in &detailed_updates {
-        if update.is_security || config.apply_updates {
-            let security_tag = if update.is_security {
-                " (SECURITY)"
-            } else {
-                ""
-            };
-            let line = format!("{} {}{}\n", update.name, update.version, security_tag);
-            eprintln!("{}", line.trim());
-            details.push_str(&line);
-        }
-    }
-
-    if security_count == 0 && !config.apply_updates {
-        details.push_str("(none)\n");
-        eprintln!("(none)");
+        let security_tag = if update.is_security {
+            " [SECURITY]"
+        } else {
+            ""
+        };
+        println!("{} {}{}", update.name, update.version, security_tag);
     }
 
     if config.apply_updates || config.apply_security_updates {
@@ -176,11 +144,8 @@ async fn run_update_check(config: Config, running: Arc<AtomicBool>) -> Result<Na
 
         if !updates_to_apply.is_empty() {
             if !config.non_interactive && !prompt_confirmation()? {
-                return Ok(NagiosOutput {
-                    status: NagiosStatus::Critical,
-                    message: "Cancelled by user".to_string(),
-                    perfdata: None,
-                });
+                eprintln!("Cancelled by user");
+                return Ok(());
             }
 
             eprintln!("Applying updates...");
@@ -190,25 +155,7 @@ async fn run_update_check(config: Config, running: Arc<AtomicBool>) -> Result<Na
         }
     }
 
-    let status = if security_count >= config.critical_threshold {
-        NagiosStatus::Critical
-    } else if security_count >= config.warning_threshold {
-        NagiosStatus::Warning
-    } else {
-        NagiosStatus::Ok
-    };
-
-    Ok(NagiosOutput {
-        status,
-        message: format!(
-            "Security-Update = {} | 'Total Update' = {}\n{}",
-            security_count, total_count, details
-        ),
-        perfdata: Some(format!(
-            "'Total Update'={} 'Security Update'={}",
-            total_count, security_count
-        )),
-    })
+    Ok(())
 }
 
 fn prompt_confirmation() -> Result<bool> {
