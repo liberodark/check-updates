@@ -20,7 +20,7 @@ regex = "1.12"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.48", features = ["full"] }
 zbus = { version = "5.12", features = ["tokio"] }
-signal-hook = "0.3"
+signal-hook = "0.4"
 signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 
 [profile.release]
