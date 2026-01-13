@@ -21,7 +21,7 @@ serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.49", features = ["full"] }
 zbus = { version = "5.13", features = ["tokio"] }
 signal-hook = "0.4"
-signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+signal-hook-tokio = { version = "0.4", features = ["futures-v0_3"] }
 
 [profile.release]
 strip = true
