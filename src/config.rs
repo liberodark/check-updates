@@ -4,7 +4,9 @@ use crate::cli::Args;
 pub struct Config {
     pub lock_file: Option<String>,
     pub cron_spec: Option<String>,
+    #[cfg(feature = "nagios")]
     pub warning_threshold: usize,
+    #[cfg(feature = "nagios")]
     pub critical_threshold: usize,
     pub apply_security_updates: bool,
     pub apply_updates: bool,
@@ -21,7 +23,9 @@ impl Config {
         Self {
             lock_file: args.lock.clone(),
             cron_spec: args.cron.clone(),
+            #[cfg(feature = "nagios")]
             warning_threshold: args.warning,
+            #[cfg(feature = "nagios")]
             critical_threshold: args.critical,
             apply_security_updates: args.security_update,
             apply_updates: args.update,

@@ -11,9 +11,11 @@ pub struct Args {
     #[arg(long, value_name = "CRON_SPEC")]
     pub cron: Option<String>,
 
+    #[cfg(feature = "nagios")]
     #[arg(short, long, default_value = "10")]
     pub warning: usize,
 
+    #[cfg(feature = "nagios")]
     #[arg(short, long, default_value = "20")]
     pub critical: usize,
 

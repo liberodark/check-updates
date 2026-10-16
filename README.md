@@ -1,6 +1,7 @@
 # check-updates
 
-A Nagios/NRPE plugin for monitoring system updates using PackageKit, written in Rust.
+A tool for checking and applying system updates using PackageKit, written in Rust.
+It is built either as a plain command-line tool (default) or as a Nagios/NRPE plugin (`nagios` feature).
 
 [![Rust](https://github.com/liberodark/check-updates/actions/workflows/rust.yml/badge.svg)](https://github.com/liberodark/check-updates/actions/workflows/rust.yml)
 [![Security Audit](https://github.com/liberodark/check-updates/actions/workflows/security-audit.yml/badge.svg)](https://github.com/liberodark/check-updates/actions/workflows/security-audit.yml)
@@ -12,7 +13,7 @@ A Nagios/NRPE plugin for monitoring system updates using PackageKit, written in 
 - Apply updates automatically (optional)
 - Lock file support to prevent concurrent execution
 - Cron-like scheduling support
-- Compatible with Nagios performance data format
+- Optional Nagios/NRPE plugin mode with performance data (`nagios` build feature)
 - Multi-distribution support (any system with PackageKit)
 - Native D-Bus communication for better performance
 
@@ -50,21 +51,33 @@ sudo zypper install PackageKit dbus-1
 ## Installation
 
 ### From source
+
+Command-line tool (default build):
 ```bash
 git clone https://github.com/liberodark/check-updates.git
 cd check-updates
 cargo build --release
-sudo cp target/release/check_updates /usr/local/nagios/libexec/
-sudo chmod +x /usr/local/nagios/libexec/check_updates
+sudo install -m 755 target/release/check_updates /usr/local/bin/
 ```
 
-### Create symlink for command-line usage
+Nagios/NRPE plugin:
 ```bash
-sudo ln -s /usr/local/nagios/libexec/check_updates /usr/bin/check_updates
+cargo build --release --features nagios
+sudo install -m 755 target/release/check_updates /usr/local/nagios/libexec/
+```
+
+A binary that runs on any x86_64 Linux distribution regardless of its glibc version
+(e.g. built on a recent distribution and deployed on Debian 12) can be produced as a static musl build:
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl [--features nagios]
+# Binary: target/x86_64-unknown-linux-musl/release/check_updates
 ```
 
 ### Precompiled binaries
-Precompiled binaries are available in the [Releases](https://github.com/liberodark/check-updates/releases) section.
+Precompiled static binaries are available in the [Releases](https://github.com/liberodark/check-updates/releases) section:
+- `check_updates-<version>-linux-x86_64`: command-line tool
+- `check_updates-nagios-<version>-linux-x86_64`: Nagios/NRPE plugin
 
 ## Usage
 
@@ -75,7 +88,7 @@ Check for updates without applying them:
 check_updates
 ```
 
-### With warning and critical thresholds
+### With warning and critical thresholds (Nagios build)
 ```bash
 check_updates -w 10 -c 20
 ```
@@ -92,7 +105,7 @@ sudo check_updates --security-update -y
 
 ### With lock file (prevent concurrent execution)
 ```bash
-check_updates --lock /tmp/check_updates.lock -w 10 -c 20
+check_updates --lock /tmp/check_updates.lock
 ```
 
 ### With cron scheduling
@@ -112,8 +125,8 @@ check_updates --lock /tmp/check_updates.lock --cron "0 */6 * *" --update -y
 Options:
   --lock <FILE>            Avoid concurrent execution by locking specified file
   --cron <CRON_SPEC>       Abort execution if run before the end of the current period (requires --lock)
-  -w, --warning <N>        Return warning if more than N security updates are available [default: 10]
-  -c, --critical <N>       Return critical if more than N security updates are available [default: 20]
+  -w, --warning <N>        Return warning if at least N security updates are available [default: 10] (Nagios build only)
+  -c, --critical <N>       Return critical if at least N security updates are available [default: 20] (Nagios build only)
   --security-update        Apply security updates instead of just showing them
   --update                 Apply all updates instead of just showing them
   -y, --yes               Disable interactive mode (assume yes)
@@ -138,6 +151,8 @@ Fields can be:
 
 ## Nagios/NRPE Configuration
 
+Requires the Nagios build (`--features nagios` or the `check_updates-nagios-*` release binary).
+
 Add to your NRPE configuration (`/usr/local/nagios/etc/nrpe.cfg`):
 
 ```bash
@@ -157,19 +172,41 @@ nagios ALL=(ALL) NOPASSWD: /usr/local/nagios/libexec/check_updates
 
 ## Output Format
 
-The plugin follows Nagios plugin standards:
+### Command-line build
 
 ```
-UPDATE OK - Security-Update = 0 | 'Total Update' = 5 'Security Update' = 0
-UPDATE WARNING - Security-Update = 12 | 'Total Update' = 25 'Security Update' = 12
-UPDATE CRITICAL - Security-Update = 25 | 'Total Update' = 40 'Security Update' = 25
+Available updates: 25 total (5 security)
+------------------------------------------------------------
+firefox 121.0-1 [SECURITY]
+kernel 6.6.8-1
+vim 9.0.2155-1
+...
+```
+
+### Nagios build
+
+The plugin follows Nagios plugin standards (security updates listed as long output):
+
+```
+UPDATE Warning - Security-Update = 12 | 'Total Update' = 25
+Security updates:
+firefox 121.0-1 (SECURITY)
+...
+ | 'Total Update'=25 'Security Update'=12
 ```
 
 ## Exit Codes
 
-- 0: OK - Updates below thresholds
-- 1: WARNING - Security updates exceed warning threshold
-- 2: CRITICAL - Security updates exceed critical threshold or error occurred
+### Command-line build
+
+- 0: Success
+- 1: Error occurred
+
+### Nagios build
+
+- 0: OK - Security updates below thresholds
+- 1: WARNING - Security updates reach the warning threshold, or lock file already held
+- 2: CRITICAL - Security updates reach the critical threshold, operation cancelled or error occurred
 - 3: UNKNOWN - Unable to determine update status
 
 ## Cron Examples
@@ -193,7 +230,8 @@ Weekly full updates on Sunday at 3 AM:
 ```bash
 cargo build
 cargo test
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features nagios -- -D warnings
 ```
 
 ### Using Nix Shell

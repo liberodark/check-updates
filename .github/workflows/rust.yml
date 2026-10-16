@@ -37,7 +37,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --features nagios -- -D warnings
 
   test:
     name: Test
@@ -66,14 +68,30 @@ jobs:
           rustup update ${{ matrix.rust }}
           rustup default ${{ matrix.rust }}
       - name: Build
-        run: cargo build --verbose
+        run: |
+          cargo build --verbose
+          cargo build --verbose --features nagios
       - name: Run tests
-        run: cargo test --verbose
+        run: |
+          cargo test --verbose
+          cargo test --verbose --features nagios
 
   build:
-    name: Build Linux
+    name: Build Linux (${{ matrix.variant }})
     needs: test
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - variant: standard
+            features: ""
+            suffix: ""
+          - variant: nagios
+            features: "nagios"
+            suffix: "-nagios"
+    env:
+      # Static musl binary: no glibc version requirement, runs on Debian 12 and older/newer distributions
+      TARGET: x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v7
       - uses: actions/cache@v5
@@ -84,37 +102,30 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev packagekit
+          key: ${{ runner.os }}-musl-${{ matrix.variant }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Install Rust
         run: |
           rustup update stable
           rustup default stable
+          rustup target add $TARGET
       - name: Build release
-        run: cargo build --release --verbose
-      - name: Set version
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
-      - name: Create tarball
-        if: startsWith(github.ref, 'refs/tags/v')
+        run: cargo build --release --verbose --target $TARGET --features "${{ matrix.features }}"
+      - name: Package
         run: |
-          cd target/release
-          tar -czvf check_updates-${{ env.VERSION }}-linux-x86_64.tar.gz check_updates
-          cd ../..
-      - name: Upload binary artifact
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="${GITHUB_SHA::7}"
+          fi
+          NAME="check_updates${{ matrix.suffix }}-${VERSION}-linux-x86_64"
+          mkdir dist
+          cp "target/$TARGET/release/check_updates" "dist/$NAME"
+          tar -czvf "dist/$NAME.tar.gz" -C "target/$TARGET/release" check_updates
+      - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: check_updates-linux
-          path: target/release/check_updates
-      - name: Upload tarball artifact
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v7
-        with:
-          name: check_updates-linux-tarball
-          path: target/release/check_updates-${{ env.VERSION }}-linux-x86_64.tar.gz
+          name: check_updates-${{ matrix.variant }}
+          path: dist/
 
   release:
     name: Release
@@ -128,20 +139,14 @@ jobs:
       - name: Get version
         id: get_version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
-      - name: Download Linux binary
+      - name: Download Linux binaries
         uses: actions/download-artifact@v8
         with:
-          name: check_updates-linux
-          path: ./
-      - name: Download Linux tarball
-        uses: actions/download-artifact@v8
-        with:
-          name: check_updates-linux-tarball
-          path: ./
+          pattern: check_updates-*
+          path: dist/
+          merge-multiple: true
       - name: Make executable
-        run: chmod +x check_updates
-      - name: Rename binary
-        run: mv check_updates check_updates-${{ env.VERSION }}-linux-x86_64
+        run: chmod +x dist/*-linux-x86_64
       - name: Extract changelog
         id: changelog
         run: |
@@ -160,9 +165,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
-          files: |
-            check_updates-${{ env.VERSION }}-linux-x86_64
-            check_updates-${{ env.VERSION }}-linux-x86_64.tar.gz
+          files: dist/*
           body: ${{ env.CHANGELOG }}
           draft: false
           prerelease: false
