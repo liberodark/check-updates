@@ -8,12 +8,9 @@ mod packagekit;
 
 use anyhow::{Context, Result};
 use chrono::Local;
-use clap::Parser;
 use futures::stream::StreamExt;
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::cli::Args;
 use crate::config::Config;
@@ -29,11 +26,8 @@ type Report = ();
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let args = Args::parse_with_c_options();
     let config = Config::from_args(&args);
-
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
 
     let mut signals = Signals::new([SIGTERM, SIGINT, SIGQUIT, SIGHUP])?;
     tokio::spawn(async move {
@@ -41,7 +35,21 @@ async fn main() -> Result<()> {
             match signal {
                 SIGTERM | SIGINT | SIGQUIT => {
                     eprintln!("Received signal {}, terminating...", signal);
-                    r.store(false, Ordering::Relaxed);
+                    #[cfg(feature = "nagios")]
+                    {
+                        let output = NagiosOutput {
+                            status: NagiosStatus::Critical,
+                            message: "Operation cancelled".to_string(),
+                            perfdata: None,
+                        };
+                        println!("{}", output);
+                        std::process::exit(output.status.exit_code());
+                    }
+                    #[cfg(not(feature = "nagios"))]
+                    {
+                        eprintln!("Operation cancelled");
+                        std::process::exit(0);
+                    }
                 }
                 _ => {}
             }
@@ -77,6 +85,8 @@ async fn main() -> Result<()> {
             if let Some(last_run) = last_run
                 && !cron::should_run(cron_spec, last_run, now)?
             {
+                #[cfg(feature = "nagios")]
+                println!("UPDATE OK | Cron timeout not expired");
                 return Ok(());
             }
 
@@ -88,7 +98,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    match run_update_check(config, running).await {
+    match run_update_check(config).await {
         #[cfg(feature = "nagios")]
         Ok(output) => {
             println!("{}", output);
@@ -114,29 +124,13 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_update_check(config: Config, running: Arc<AtomicBool>) -> Result<Report> {
+async fn run_update_check(config: Config) -> Result<Report> {
     let pm = PackageManager::new().await?;
 
-    if running.load(Ordering::Relaxed) {
-        eprintln!("Refreshing package cache...");
-        pm.refresh_cache()
-            .await
-            .context("Failed to refresh package cache")?;
-    }
-
-    if !running.load(Ordering::Relaxed) {
-        #[cfg(feature = "nagios")]
-        return Ok(NagiosOutput {
-            status: NagiosStatus::Critical,
-            message: "Operation cancelled".to_string(),
-            perfdata: None,
-        });
-        #[cfg(not(feature = "nagios"))]
-        {
-            eprintln!("Operation cancelled");
-            return Ok(());
-        }
-    }
+    eprintln!("Refreshing package cache...");
+    pm.refresh_cache()
+        .await
+        .context("Failed to refresh package cache")?;
 
     eprintln!("Getting available updates...");
     let updates = pm.get_updates().await.context("Failed to get updates")?;
@@ -231,7 +225,9 @@ async fn run_update_check(config: Config, running: Arc<AtomicBool>) -> Result<Re
         };
 
         if !updates_to_apply.is_empty() {
-            if !config.non_interactive && !prompt_confirmation()? {
+            if !config.non_interactive
+                && !tokio::task::spawn_blocking(prompt_confirmation).await??
+            {
                 #[cfg(feature = "nagios")]
                 return Ok(NagiosOutput {
                     status: NagiosStatus::Critical,

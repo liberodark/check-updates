@@ -1,10 +1,10 @@
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use zbus::{Connection, proxy};
+use std::collections::HashSet;
+use zbus::fdo::{DBusProxy, NameOwnerChangedStream};
+use zbus::message::{Message, Type};
+use zbus::{Connection, MatchRule, MessageStream, proxy};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateInfo {
@@ -14,8 +14,13 @@ pub struct UpdateInfo {
     pub is_security: bool,
 }
 
+const PK_SERVICE: &str = "org.freedesktop.PackageKit";
+const PK_TRANSACTION_INTERFACE: &str = "org.freedesktop.PackageKit.Transaction";
 const PK_FILTER_ENUM_NONE: u64 = 0;
 const PK_TRANSACTION_FLAG_ENUM_ONLY_TRUSTED: u64 = 1 << 1;
+const PK_INFO_ENUM_SECURITY: u32 = 8;
+const PK_INFO_ENUM_MASK: u32 = 0xFFFF;
+const PK_EXIT_ENUM_SUCCESS: u32 = 1;
 
 #[proxy(
     interface = "org.freedesktop.PackageKit",
@@ -71,6 +76,47 @@ pub struct PackageManager {
     connection: Connection,
 }
 
+struct TransactionSignals {
+    messages: MessageStream,
+    owner_changes: NameOwnerChangedStream,
+}
+
+impl TransactionSignals {
+    async fn collect(
+        mut self,
+        call: impl Future<Output = zbus::Result<()>>,
+    ) -> Result<Vec<Message>> {
+        let wait = async {
+            let mut signals = Vec::new();
+            loop {
+                tokio::select! {
+                    message = self.messages.next() => {
+                        let message = message.context("D-Bus connection closed")??;
+                        if let Some(finished) = Finished::from_message(message.clone()) {
+                            if finished.args()?.exit == PK_EXIT_ENUM_SUCCESS {
+                                return Ok(signals);
+                            }
+                            match signals.into_iter().filter_map(ErrorCode::from_message).next_back() {
+                                Some(error) => bail!("{}", error.args()?.details),
+                                None => bail!("PackageKit transaction failed"),
+                            }
+                        }
+                        signals.push(message);
+                    }
+                    Some(change) = self.owner_changes.next() => {
+                        if change.args()?.new_owner().is_none() {
+                            bail!("PackageKit stopped before the transaction finished");
+                        }
+                    }
+                }
+            }
+        };
+
+        let ((), signals) = tokio::try_join!(async { Ok(call.await?) }, wait)?;
+        Ok(signals)
+    }
+}
+
 impl PackageManager {
     pub async fn new() -> Result<Self> {
         let connection = Connection::system()
@@ -80,9 +126,7 @@ impl PackageManager {
         Ok(Self { connection })
     }
 
-    pub async fn refresh_cache(&self) -> Result<()> {
-        eprintln!("Creating transaction for cache refresh...");
-
+    async fn transaction(&self) -> Result<(TransactionProxy<'_>, TransactionSignals)> {
         let pk_proxy = PackageKitProxy::new(&self.connection)
             .await
             .context("Failed to create PackageKit proxy")?;
@@ -92,158 +136,97 @@ impl PackageManager {
             .await
             .context("Failed to create transaction")?;
 
+        let rule = MatchRule::builder()
+            .msg_type(Type::Signal)
+            .interface(PK_TRANSACTION_INTERFACE)?
+            .path(transaction_path.clone())?
+            .build();
+        let messages = MessageStream::for_match_rule(rule, &self.connection, None).await?;
+        let owner_changes = DBusProxy::new(&self.connection)
+            .await?
+            .receive_name_owner_changed_with_args(&[(0, PK_SERVICE)])
+            .await?;
+
         let transaction = TransactionProxy::builder(&self.connection)
-            .path(&transaction_path)?
+            .path(transaction_path)?
             .build()
             .await
             .context("Failed to create transaction proxy")?;
 
-        let finished = Arc::new(Mutex::new(false));
-        let finished_clone = finished.clone();
+        Ok((
+            transaction,
+            TransactionSignals {
+                messages,
+                owner_changes,
+            },
+        ))
+    }
 
-        let mut finished_stream = transaction.receive_finished().await?;
-        tokio::spawn(async move {
-            while (finished_stream.next().await).is_some() {
-                *finished_clone.lock().await = true;
-            }
-        });
+    pub async fn refresh_cache(&self) -> Result<()> {
+        eprintln!("Creating transaction for cache refresh...");
 
-        transaction
-            .refresh_cache(true)
-            .await
-            .context("Failed to refresh cache")?;
-
-        while !*finished.lock().await {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let (transaction, signals) = self.transaction().await?;
+        // Not fatal: refreshing requires authorization that a non-root caller
+        // (e.g. NRPE) usually lacks, and the check can use the current cache.
+        if let Err(e) = signals.collect(transaction.refresh_cache(true)).await {
+            eprintln!("Warning: Failed to refresh cache: {:#}", e);
         }
 
         Ok(())
     }
 
-    pub async fn get_updates(&self) -> Result<Vec<String>> {
+    /// Returns the package ID of each available update, and whether PackageKit
+    /// classifies it as a security update.
+    pub async fn get_updates(&self) -> Result<Vec<(String, bool)>> {
         eprintln!("Creating transaction for getting updates...");
 
-        let pk_proxy = PackageKitProxy::new(&self.connection)
-            .await
-            .context("Failed to create PackageKit proxy")?;
-
-        let transaction_path = pk_proxy
-            .create_transaction()
-            .await
-            .context("Failed to create transaction")?;
-
-        let transaction = TransactionProxy::builder(&self.connection)
-            .path(&transaction_path)?
-            .build()
-            .await
-            .context("Failed to create transaction proxy")?;
-
-        let packages = Arc::new(Mutex::new(Vec::new()));
-        let packages_clone = packages.clone();
-        let finished = Arc::new(Mutex::new(false));
-        let finished_clone = finished.clone();
-
-        let mut package_stream = transaction.receive_package().await?;
-        tokio::spawn(async move {
-            while let Some(signal) = package_stream.next().await {
-                if let Ok(args) = signal.args() {
-                    packages_clone.lock().await.push(args.package_id);
-                }
-            }
-        });
-
-        let mut finished_stream = transaction.receive_finished().await?;
-        tokio::spawn(async move {
-            while (finished_stream.next().await).is_some() {
-                *finished_clone.lock().await = true;
-            }
-        });
-
-        transaction
-            .get_updates(PK_FILTER_ENUM_NONE)
+        let (transaction, signals) = self.transaction().await?;
+        let signals = signals
+            .collect(transaction.get_updates(PK_FILTER_ENUM_NONE))
             .await
             .context("Failed to get updates")?;
 
-        while !*finished.lock().await {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let mut updates = Vec::new();
+        for signal in signals.into_iter().filter_map(Package::from_message) {
+            let args = signal.args()?;
+            let is_security = args.info & PK_INFO_ENUM_MASK == PK_INFO_ENUM_SECURITY;
+            updates.push((args.package_id, is_security));
         }
 
-        let result = packages.lock().await.clone();
-        Ok(result)
+        Ok(updates)
     }
 
-    pub async fn get_update_details(&self, package_ids: &[String]) -> Result<Vec<UpdateInfo>> {
-        if package_ids.is_empty() {
+    pub async fn get_update_details(&self, updates: &[(String, bool)]) -> Result<Vec<UpdateInfo>> {
+        if updates.is_empty() {
             return Ok(Vec::new());
         }
 
-        eprintln!("Getting update details for {} packages", package_ids.len());
+        eprintln!("Getting update details for {} packages", updates.len());
 
-        let pk_proxy = PackageKitProxy::new(&self.connection)
-            .await
-            .context("Failed to create PackageKit proxy")?;
-
-        let transaction_path = pk_proxy
-            .create_transaction()
-            .await
-            .context("Failed to create transaction")?;
-
-        let transaction = TransactionProxy::builder(&self.connection)
-            .path(&transaction_path)?
-            .build()
-            .await
-            .context("Failed to create transaction proxy")?;
-
-        let details = Arc::new(Mutex::new(HashMap::new()));
-        let details_clone = details.clone();
-        let finished = Arc::new(Mutex::new(false));
-        let finished_clone = finished.clone();
-
-        let mut update_detail_stream = transaction.receive_update_detail().await?;
-        tokio::spawn(async move {
-            while let Some(signal) = update_detail_stream.next().await {
-                if let Ok(args) = signal.args() {
-                    let is_security = !args.cve_urls.is_empty()
-                        || args.update_text.contains("CVE-")
-                        || args.changelog.contains("CVE-");
-
-                    details_clone
-                        .lock()
-                        .await
-                        .insert(args.package_id, is_security);
-                }
-            }
-        });
-
-        let mut finished_stream = transaction.receive_finished().await?;
-        tokio::spawn(async move {
-            while (finished_stream.next().await).is_some() {
-                *finished_clone.lock().await = true;
-            }
-        });
-
-        let package_refs: Vec<&str> = package_ids.iter().map(|s| s.as_str()).collect();
-        transaction
-            .get_update_detail(&package_refs)
+        let (transaction, signals) = self.transaction().await?;
+        let package_refs: Vec<&str> = updates.iter().map(|(id, _)| id.as_str()).collect();
+        let signals = signals
+            .collect(transaction.get_update_detail(&package_refs))
             .await
             .context("Failed to get update details")?;
 
-        while !*finished.lock().await {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-
-        let details_map = details.lock().await;
-        let mut results = Vec::new();
-
-        for package_id in package_ids {
-            let is_security = details_map.get(package_id).copied().unwrap_or(false);
-
-            if let Some(update_info) = parse_package_id(package_id, is_security) {
-                results.push(update_info);
+        let mut cve_fixes = HashSet::new();
+        for signal in signals.into_iter().filter_map(UpdateDetail::from_message) {
+            let args = signal.args()?;
+            if !args.cve_urls.is_empty()
+                || args.update_text.contains("CVE-")
+                || args.changelog.contains("CVE-")
+            {
+                cve_fixes.insert(args.package_id);
             }
         }
 
-        Ok(results)
+        Ok(updates
+            .iter()
+            .filter_map(|(package_id, is_security)| {
+                parse_package_id(package_id, *is_security || cve_fixes.contains(package_id))
+            })
+            .collect())
     }
 
     pub async fn apply_updates(&self, updates: &[UpdateInfo]) -> Result<()> {
@@ -253,55 +236,14 @@ impl PackageManager {
 
         eprintln!("Applying {} updates", updates.len());
 
-        let pk_proxy = PackageKitProxy::new(&self.connection)
-            .await
-            .context("Failed to create PackageKit proxy")?;
-
-        let transaction_path = pk_proxy
-            .create_transaction()
-            .await
-            .context("Failed to create transaction")?;
-
-        let transaction = TransactionProxy::builder(&self.connection)
-            .path(&transaction_path)?
-            .build()
-            .await
-            .context("Failed to create transaction proxy")?;
-
-        let finished = Arc::new(Mutex::new(false));
-        let finished_clone = finished.clone();
-        let error = Arc::new(Mutex::new(None));
-        let error_clone = error.clone();
-
-        let mut finished_stream = transaction.receive_finished().await?;
-        tokio::spawn(async move {
-            while (finished_stream.next().await).is_some() {
-                *finished_clone.lock().await = true;
-            }
-        });
-
-        let mut error_stream = transaction.receive_error_code().await?;
-        tokio::spawn(async move {
-            while let Some(signal) = error_stream.next().await {
-                if let Ok(args) = signal.args() {
-                    *error_clone.lock().await = Some(args.details);
-                }
-            }
-        });
-
+        let (transaction, signals) = self.transaction().await?;
         let package_ids: Vec<&str> = updates.iter().map(|u| u.package_id.as_str()).collect();
-        transaction
-            .update_packages(PK_TRANSACTION_FLAG_ENUM_ONLY_TRUSTED, &package_ids)
+        signals
+            .collect(
+                transaction.update_packages(PK_TRANSACTION_FLAG_ENUM_ONLY_TRUSTED, &package_ids),
+            )
             .await
-            .context("Failed to update packages")?;
-
-        while !*finished.lock().await {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-
-        if let Some(error_msg) = error.lock().await.as_ref() {
-            bail!("Package update failed: {}", error_msg);
-        }
+            .context("Package update failed")?;
 
         Ok(())
     }

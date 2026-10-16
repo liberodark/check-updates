@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::ffi::OsString;
 
 #[derive(Parser, Debug)]
 #[command(name = "check_updates")]
@@ -27,4 +28,15 @@ pub struct Args {
 
     #[arg(short = 'y', long)]
     pub yes: bool,
+}
+
+impl Args {
+    pub fn parse_with_c_options() -> Self {
+        Self::parse_from(std::env::args_os().map(|arg| match arg.to_str() {
+            Some(option @ ("-lock" | "-cron" | "-security-update" | "-update")) => {
+                OsString::from(format!("-{}", option))
+            }
+            _ => arg,
+        }))
+    }
 }
