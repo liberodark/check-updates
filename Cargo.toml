@@ -1,6 +1,6 @@
 [package]
 name = "check_updates"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Check system updates via PackageKit, optionally as a Nagios plugin"
 license = "GPL-3.0"
@@ -19,7 +19,7 @@ futures = "0.3"
 regex = "1.12"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.50", features = ["full"] }
-zbus = { version = "5.16", features = ["tokio"] }
+zbus = { version = "6.0", default-features = false, features = ["tokio", "proxy"] }
 signal-hook = "0.4"
 signal-hook-tokio = { version = "0.4", features = ["futures-v0_3"] }
 

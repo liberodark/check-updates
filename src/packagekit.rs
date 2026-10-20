@@ -28,7 +28,7 @@ const PK_EXIT_ENUM_SUCCESS: u32 = 1;
     default_path = "/org/freedesktop/PackageKit"
 )]
 trait PackageKit {
-    async fn create_transaction(&self) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+    async fn create_transaction(&self) -> zbus::Result<zbus::OwnedObjectPath>;
 }
 
 #[proxy(
@@ -138,9 +138,9 @@ impl PackageManager {
 
         let rule = MatchRule::builder()
             .msg_type(Type::Signal)
-            .interface(PK_TRANSACTION_INTERFACE)?
-            .path(transaction_path.clone())?
-            .build();
+            .interface(PK_TRANSACTION_INTERFACE)
+            .path(transaction_path.clone())
+            .build()?;
         let messages = MessageStream::for_match_rule(rule, &self.connection, None).await?;
         let owner_changes = DBusProxy::new(&self.connection)
             .await?
@@ -148,7 +148,7 @@ impl PackageManager {
             .await?;
 
         let transaction = TransactionProxy::builder(&self.connection)
-            .path(transaction_path)?
+            .path(transaction_path)
             .build()
             .await
             .context("Failed to create transaction proxy")?;

@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/
@@ -50,7 +50,7 @@ jobs:
         rust: [stable, beta]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/
@@ -94,7 +94,7 @@ jobs:
       TARGET: x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/
